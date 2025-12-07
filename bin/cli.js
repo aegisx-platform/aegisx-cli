@@ -117,7 +117,11 @@ program
   )
   .option(
     '--shell <shell>',
-    'Target shell for route registration (e.g., system, inventory). If specified, routes will be registered in the shell routes file instead of app.routes.ts',
+    'Target shell for frontend generation (e.g., inventory, system). Output goes to features/{shell}/modules/ and routes are registered in shell routes file',
+  )
+  .option(
+    '--section <section>',
+    'Target section within a shell (e.g., master-data). Module will be registered in section config instead of main config',
   )
   .option(
     '-s, --schema <schema>',
@@ -192,7 +196,7 @@ program
         options.app = 'web';
       }
 
-      // Determine output directory based on app and target
+      // Determine output directory based on app, target, and shell
       let outputDir = options.output;
       if (!outputDir) {
         const appPaths = {
@@ -214,6 +218,61 @@ program
         outputDir =
           appPaths[options.app]?.[options.target] ||
           path.resolve(PROJECT_ROOT, 'apps/api/src/modules');
+
+        // Handle --shell option for frontend target
+        // When shell is specified, output to the shell's modules folder
+        // Track whether module is inside shell's modules/ folder for import path calculation
+        let isInsideShellModules = false;
+        if (options.shell && options.target === 'frontend') {
+          const fs = require('fs');
+          const shellPath = path.resolve(
+            PROJECT_ROOT,
+            `apps/${options.app}/src/app/features/${options.shell}`,
+          );
+          const shellModulesPath = path.join(shellPath, 'modules');
+
+          if (fs.existsSync(shellPath)) {
+            // Check if shell has modules/ subfolder
+            if (fs.existsSync(shellModulesPath)) {
+              outputDir = shellModulesPath;
+              isInsideShellModules = true;
+              console.log(
+                chalk.green(
+                  `🐚 Shell '${options.shell}' detected with modules/ folder`,
+                ),
+              );
+            } else {
+              outputDir = shellPath;
+              console.log(
+                chalk.yellow(
+                  `🐚 Shell '${options.shell}' exists but no modules/ folder found`,
+                ),
+              );
+              console.log(
+                chalk.gray(`   Output will go directly to: ${shellPath}`),
+              );
+            }
+          } else {
+            console.log(
+              chalk.red(
+                `\n❌ Shell '${options.shell}' not found at: ${shellPath}`,
+              ),
+            );
+            console.log(
+              chalk.gray(
+                `   Make sure the shell exists in apps/${options.app}/src/app/features/${options.shell}/`,
+              ),
+            );
+            console.log(
+              chalk.cyan(
+                `   You can create a shell first with: aegisx shell:init ${options.shell} --app ${options.app}`,
+              ),
+            );
+            process.exit(1);
+          }
+        }
+        // Store isInsideShellModules in options for later use
+        options.isInsideShellModules = isInsideShellModules;
       }
 
       console.log(`🚀 Generating CRUD module for table: ${tableName}`);
@@ -333,7 +392,13 @@ program
         const frontendGenerator = new FrontendGenerator(
           toolsDir,
           PROJECT_ROOT,
-          { templateVersion: 'v2', app: options.app || 'web' },
+          {
+            templateVersion: 'v2',
+            app: options.app || 'web',
+            schema: options.schema || 'public',
+            domain: options.domain,
+            outputDir: outputDir,
+          },
         );
 
         const generatedFiles = await frontendGenerator.generateFrontendModule(
@@ -451,14 +516,38 @@ program
             const frontendGenerator = new FrontendGenerator(
               path.join(__dirname, '..'),
               PROJECT_ROOT,
-              { templateVersion: 'v2', app: options.app || 'web' },
+              {
+                templateVersion: 'v2',
+                app: options.app || 'web',
+                schema: options.schema || 'public',
+                domain: options.domain,
+              },
             );
             // Use shell-based registration if --shell is specified
             if (options.shell) {
               await frontendGenerator.autoRegisterShellRoute(
                 tableName,
                 options.shell,
+                {
+                  isInsideShellModules: options.isInsideShellModules,
+                  section: options.section,
+                },
               );
+              // Register in section config or main config for ax-launcher display
+              if (options.section) {
+                // Register in section's SECTION_ITEMS config
+                await frontendGenerator.registerSectionConfig(
+                  tableName,
+                  options.shell,
+                  options.section,
+                );
+              } else {
+                // Register in main.config.ts MODULE_ITEMS
+                await frontendGenerator.registerMasterDataConfig(
+                  tableName,
+                  options.shell,
+                );
+              }
             } else {
               await frontendGenerator.autoRegisterRoute(tableName);
             }
@@ -506,6 +595,11 @@ program
     'backend',
   )
   .option('-c, --config <file>', 'Configuration file path')
+  .option(
+    '-s, --schema <schema>',
+    'PostgreSQL schema to read table from (default: public)',
+    'public',
+  )
   .action(async (domainName, options) => {
     try {
       // Determine output directory based on app and target
@@ -536,6 +630,7 @@ program
         : ['core'];
 
       console.log(`🚀 Generating domain: ${domainName}`);
+      console.log(`🗄️  Database schema: ${options.schema}`);
       console.log(`📱 Target app: ${options.app}`);
       console.log(`🎯 Target type: ${options.target}`);
       console.log(`🛣️  Routes: ${routes.join(', ')}`);
@@ -556,6 +651,7 @@ program
         configFile: options.config,
         app: options.app,
         target: options.target,
+        schema: options.schema,
       });
 
       if (options.dryRun) {
@@ -899,6 +995,11 @@ program
   )
   .option('--order <number>', 'App order in launcher', '0')
   .option('--with-dashboard', 'Include dashboard page', true)
+  .option(
+    '--with-master-data',
+    'Include Master Data page with ax-launcher for CRUD modules',
+    true,
+  )
   .option('--with-settings', 'Include settings page')
   .option('--with-auth', 'Include AuthGuard and AuthService', true)
   .option('--with-theme-switcher', 'Include theme switcher component')
@@ -933,6 +1034,7 @@ program
         theme: options.theme || 'default',
         order: parseInt(options.order, 10) || 0,
         withDashboard: options.withDashboard !== false,
+        withMasterData: options.withMasterData !== false,
         withSettings: options.withSettings || false,
         withAuth: options.withAuth !== false,
         withThemeSwitcher: options.withThemeSwitcher || false,
@@ -977,8 +1079,17 @@ program
 
         console.log(chalk.green('\n✅ Shell generated successfully!\n'));
         console.log(chalk.bold.yellow('📋 Next Steps:\n'));
-        console.log('1. Add to app.routes.ts:');
-        console.log(chalk.gray(result.routeSnippet));
+
+        // Check if route was auto-registered
+        if (result.routeRegistered) {
+          console.log(
+            chalk.green('✓ Route already registered in app.routes.ts'),
+          );
+        } else {
+          console.log('1. Add to app.routes.ts:');
+          console.log(chalk.gray(result.routeSnippet));
+        }
+
         console.log('\n2. Customize navigation in:');
         console.log(
           chalk.gray(`   ${result.outputDir}/${shellName}.config.ts\n`),
@@ -1043,6 +1154,81 @@ program
     console.log('  # To admin app instead of web');
     console.log('  ./bin/cli.js shell system --app admin --force');
     console.log('');
+  });
+
+program
+  .command('section <shell-name> <section-name>')
+  .alias('sec')
+  .description('Generate a section within a shell (sub-page with ax-launcher)')
+  .option('-a, --app <app>', 'Target app (web, admin)', 'web')
+  .option('-n, --name <name>', 'Display name for the section')
+  .option('-f, --force', 'Force overwrite existing files without confirmation')
+  .option('-d, --dry-run', 'Preview files without creating them')
+  .option('--no-format', 'Skip auto-formatting generated files')
+  .action(async (shellName, sectionName, options) => {
+    try {
+      // Validate app
+      const validApps = ['web', 'admin'];
+      if (!validApps.includes(options.app)) {
+        console.error(chalk.red(`❌ Invalid app: ${options.app}`));
+        console.error(`   Valid options: ${validApps.join(', ')}`);
+        process.exit(1);
+      }
+
+      console.log(chalk.bold.cyan(`\n📂 Generating Section: ${sectionName}\n`));
+
+      const generator = new ShellGenerator({
+        dryRun: options.dryRun,
+        force: options.force,
+        app: options.app,
+      });
+
+      const result = await generator.generateSection(
+        shellName,
+        sectionName,
+        options.name,
+      );
+
+      if (!result.success) {
+        if (result.reason === 'exists') {
+          console.log(
+            chalk.yellow('\n⚠️  Use --force to overwrite existing section\n'),
+          );
+        }
+        process.exit(1);
+      }
+
+      if (!options.dryRun) {
+        // Auto-format generated TypeScript files
+        if (result.files.length > 0 && options.format !== false) {
+          console.log('\n🎨 Formatting generated TypeScript files...');
+          try {
+            const { execSync } = require('child_process');
+
+            for (const file of result.files) {
+              try {
+                execSync(`npx prettier --write "${file}"`, {
+                  cwd: PROJECT_ROOT,
+                  stdio: 'pipe',
+                  timeout: 10000,
+                });
+              } catch (error) {
+                console.log(chalk.yellow(`⚠️  Could not format ${file}`));
+              }
+            }
+            console.log(chalk.green('✅ Code formatting completed!'));
+          } catch (error) {
+            console.log(
+              chalk.yellow('⚠️  Formatting skipped - prettier not available'),
+            );
+          }
+        }
+      }
+    } catch (error) {
+      console.error(chalk.red('\n❌ Error generating section:'));
+      console.error(error.message);
+      process.exit(1);
+    }
   });
 
 // ═══════════════════════════════════════════════════════════════════════════
